@@ -103,7 +103,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.layout()
+		m.updateLayout()
 
 	case channelsLoadedMsg:
 		m.channels = msg.channels
@@ -112,12 +112,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			items[i] = channelItem{ch}
 		}
 		m.channelList.SetItems(items)
+		// Auto-select the first channel
+		if len(msg.channels) > 0 {
+			ch := msg.channels[0]
+			m.selectedChannel = &ch
+			m.updateLayout()
+			cmds = append(cmds, loadMessages(m.client, ch.ID))
+		}
 
 	case channelsErrMsg:
 		m.statusMsg = "Error loading channels: " + msg.err.Error()
 
 	case messagesLoadedMsg:
 		m.messages = msg.messages
+		m.updateLayout()
 		m.msgViewport.SetContent(m.renderMessages())
 		m.msgViewport.GotoBottom()
 
@@ -127,6 +135,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case IncomingMessageMsg:
 		if m.selectedChannel != nil && m.selectedChannel.ID == msg.ChannelID {
 			m.messages = append(m.messages, msg.Message)
+			m.updateLayout()
 			m.msgViewport.SetContent(m.renderMessages())
 			m.msgViewport.GotoBottom()
 		}
@@ -176,17 +185,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Route keys to focused component
 		switch m.focus {
 		case focusChannels:
+			prevIndex := m.channelList.Index()
 			var cmd tea.Cmd
 			m.channelList, cmd = m.channelList.Update(msg)
 			cmds = append(cmds, cmd)
 
 			if msg.String() == "enter" {
+				// Enter switches focus to the message panel
+				if m.selectedChannel != nil {
+					m.focus = focusMessages
+				}
+			} else if m.channelList.Index() != prevIndex {
+				// Cursor moved — load the new channel immediately
 				if item, ok := m.channelList.SelectedItem().(channelItem); ok {
 					ch := item.channel
 					m.selectedChannel = &ch
 					m.messages = nil
 					m.msgViewport.SetContent("")
 					m.statusMsg = ""
+					m.updateLayout()
 					cmds = append(cmds, loadMessages(m.client, ch.ID))
 				}
 			}
@@ -225,7 +242,6 @@ func (m Model) View() string {
 	mainW := m.width - sideW - 3 // 3 for borders/gap
 
 	// Left panel
-	m.channelList.SetSize(sideW, m.height-2)
 	sideStyle := lipgloss.NewStyle().
 		Width(sideW).
 		Height(m.height - 2).
@@ -242,7 +258,6 @@ func (m Model) View() string {
 			Width(mainW).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(m.borderColor(focusInput))
-		m.input.SetWidth(mainW - 2)
 		inputView = inputStyle.Render(m.input.View())
 	}
 
@@ -250,8 +265,6 @@ func (m Model) View() string {
 	if vpH < 1 {
 		vpH = 1
 	}
-	m.msgViewport.Width = mainW
-	m.msgViewport.Height = vpH - 2
 
 	title := "No channel selected"
 	if m.selectedChannel != nil {
@@ -293,8 +306,33 @@ func (m Model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, body, status)
 }
 
-func (m *Model) layout() {
-	// Trigger resize on sub-components via View() when needed
+func (m *Model) updateLayout() {
+	if m.width == 0 {
+		return
+	}
+	const sideW = 24
+	mainW := m.width - sideW - 3
+
+	inputH := 0
+	if m.selectedChannel != nil {
+		inputH = 5 // input box height including its border
+	}
+
+	// Outer viewport box height (includes its own border)
+	vpBoxH := m.height - 2 - inputH
+	if vpBoxH < 4 {
+		vpBoxH = 4
+	}
+
+	// Inner viewport: subtract border (2) and title+blank line (2)
+	m.msgViewport.Width = mainW - 2
+	m.msgViewport.Height = vpBoxH - 4
+	if m.msgViewport.Height < 1 {
+		m.msgViewport.Height = 1
+	}
+
+	m.channelList.SetSize(sideW, m.height-2)
+	m.input.SetWidth(mainW - 2)
 }
 
 func (m Model) borderColor(f focus) lipgloss.Color {
